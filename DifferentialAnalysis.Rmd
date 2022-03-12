@@ -1,0 +1,515 @@
+---
+title: "Diff Analysis"
+output: html_notebook
+---
+
+
+```{r setup, include=FALSE}
+figure_filepath <- "/Users/donghur/Desktop/STEMREM 205 - Bioinformatics for Stem Cell and Cancer Biology/Project/Figures"
+knitr::opts_chunk$set(echo = TRUE, fig.path = figure_filepath)
+```
+
+Load all relevant packages.
+
+```{r library, message = FALSE}
+library(DESeq2)
+library(edgeR)
+library(gplots)
+library(ggplot2)
+library(org.Mm.eg.db)
+library(org.Hs.eg.db)
+library(dplyr)
+library(tibble)
+library(clusterProfiler)
+library(enrichplot)
+library(ggnewscale)
+library(pheatmap)
+library(reshape2)
+library(viridis)
+library(RColorBrewer)
+```
+
+# 1. Data Preprocessing
+*Set up an RStudio project specifying the directory where you have saved the `/data` directory*.
+
+```{r Data Import}
+project_dir <- "/Users/donghur/Desktop/STEMREM 205 - Bioinformatics for Stem Cell and Cancer Biology/Project"
+filepath <- file.path(project_dir, "Data/RNA-seq", "melanoma_RNA_samplemetadata.csv")
+# Read the sample information into R
+sampleinfo <- read.csv(filepath, header = T, sep = ",")
+#View(sampleinfo)
+sampleinfo
+```
+
+```{r Reading Count Data}
+# Read the data into R
+project_dir <- "/Users/donghur/Desktop/STEMREM 205 - Bioinformatics for Stem Cell and Cancer Biology/Project"
+filepath <- file.path(project_dir, "Data/RNA-seq", "expectedcounts_RNAseq_melanoma.txt")
+counts <- read.table(filepath, header = TRUE, sep = "\t", stringsAsFactors = FALSE)
+rownames(counts) <- counts$gene_id
+counts <- counts[,-1]
+
+# cast all count data to integer
+counts <- round(counts)
+
+# makes sure the sampleinfo row and cts row are in the same order
+all(sampleinfo$id == colnames(counts))
+```
+
+```{r Pre-filtering}
+# Which gene have counts greater than 2
+thresh <- counts > 2
+# Summary of how many TRUEs there are in each row
+table(rowSums(thresh))
+
+# We would like to keep genes that have at least 3 TRUES in each row of thresh
+keep <- rowSums(thresh) >= 3
+# Subset the rows of countdata to keep the more highly expressed genes
+counts.keep <- counts[keep,]
+summary(keep)
+dim(counts.keep)
+```
+
+```{r DGEList}
+dgeObj <- DGEList(counts.keep)
+dgeObj
+dgeObj$samples$lib.size
+```
+
+```{r Total Counts Per Sample}
+# The names argument tells the barplot to use the sample names on the x-axis
+# The las argument rotates the axis names
+par(oma=c(10,1,0,0))
+
+barplot(dgeObj$samples$lib.size, names=colnames(dgeObj), las=2)
+# Add a title to the plot
+title("Total Counts Per Sample")
+```
+
+```{r Total Log2 CPM Per Sample}
+#png(file.path(figure_filepath, "LogCPM_Boxplot.png"), res=300)
+par(oma=c(10,1,0,0))
+
+# Get log2 counts per million
+logcounts <- cpm(dgeObj,log=TRUE)
+# Check distributions of samples using boxplots
+boxplot(logcounts, xlab="", ylab="Log2 counts per million",las=2)
+# Let's add a blue horizontal line that corresponds to the median logCPM
+abline(h=median(logcounts),col="blue")
+title("Total Log2 CPM Per Sample")
+#dev.off()
+```
+
+```{r Stratifying Data: Melanoma vs Melanocytes}
+filter_celltype <- (sampleinfo$drug == "DMSO") & (sampleinfo$KD == "SCR")
+sampleinfo.celltype <- sampleinfo[filter_celltype,]
+sampleinfo.celltype
+counts.celltype <- counts.keep[,filter_celltype]
+counts.celltype
+```
+ 
+```{r Stratifying Data: PLX vs DMSO}
+filter_drug <- (sampleinfo$KD == "SCR") & (sampleinfo$sample != "Melanocytes")
+sampleinfo.drug <- sampleinfo[filter_drug,]
+sampleinfo.drug
+counts.drug <- counts.keep[,filter_drug]
+counts.drug
+```
+
+```{r Stratifying Data: shMITF vs SCR}
+filter_KD <- (sampleinfo$drug != "DMSO") & (sampleinfo$sample != "Melanocytes")
+sampleinfo.KD <- sampleinfo[filter_KD,]
+sampleinfo.KD
+counts.KD <- counts.keep[,filter_KD]
+counts.KD
+```
+
+# 2.  Differential Gene Expression
+
+```{r DESeq2: Melanoma vs Melanocytes}
+dds.celltype <- DESeqDataSetFromMatrix(countData=counts.celltype, 
+                              colData=sampleinfo.celltype, 
+                              design= ~cell_type)
+# have a look at the object
+dds.celltype
+dds.celltype <- DESeq(dds.celltype)
+```
+
+```{r DESeq2: PLX vs DMSO}
+dds.drug <- DESeqDataSetFromMatrix(countData=counts.drug, 
+                              colData=sampleinfo.drug, 
+                              design= ~cell_type + drug)
+# have a look at the object
+dds.drug
+dds.drug <- DESeq(dds.drug)
+```
+
+```{r DESeq2: shMITF vs SCR}
+dds.KD <- DESeqDataSetFromMatrix(countData=counts.KD, 
+                              colData=sampleinfo.KD, 
+                              design= ~cell_type + KD)
+# have a look at the object
+dds.KD
+dds.KD <- DESeq(dds.KD)
+```
+
+```{r DESeq2 Results: Melanoma vs Melanocytes}
+res.celltype.COLO <- results(dds.celltype, contrast=c("cell_type","Melanocytes", "COLO"), alpha=0.05)
+res.celltype.SKMEL5 <- results(dds.celltype, contrast=c("cell_type","Melanocytes", "SKMEL5"), alpha=0.05)
+res.celltype.WM2664 <- results(dds.celltype, contrast=c("cell_type","Melanocytes", "WM2664"), alpha=0.05)
+
+# Filter out lower Log2FC
+mean(abs(res.celltype.COLO $log2FoldChange),na.rm=TRUE)
+summary(abs(res.celltype.COLO $log2FoldChange), na.rm=TRUE)
+
+# log2fc_filt <- which(abs(res.celltype.COLO$log2FoldChange) > 2)
+# res.celltype.COLO <- res.celltype.COLO[log2fc_filt,]
+# log2fc_filt <- which(abs(res.celltype.SKMEL5$log2FoldChange) > 2)
+# res.celltype.SKMEL5 <- res.celltype.SKMEL5[log2fc_filt,]
+# log2fc_filt <- which(abs(res.celltype.WM2664$log2FoldChange) > 2)
+# res.celltype.WM2664 <- res.celltype.WM2664[log2fc_filt,]
+
+# Sort summary list by p-value
+res.celltype.COLO <- res.celltype.COLO[order(res.celltype.COLO$padj),]
+res.celltype.SKMEL5 <- res.celltype.SKMEL5[order(res.celltype.SKMEL5$padj),]
+res.celltype.WM2664 <- res.celltype.WM2664[order(res.celltype.WM2664$padj),]
+# number of genes with p-values less than 0.05
+sum(res.celltype.COLO$padj < 0.05, na.rm=TRUE)
+sum(res.celltype.SKMEL5$padj < 0.05, na.rm=TRUE)
+sum(res.celltype.WM2664$padj < 0.05, na.rm=TRUE)
+
+head(res.celltype.COLO)
+head(res.celltype.SKMEL5)
+head(res.celltype.WM2664)
+```
+
+```{r DESeq2 Results: PLX vs DMSO}
+res.drug <- results(dds.drug, alpha=0.05)
+# Filter out lower Log2FC
+mean(abs(res.drug$log2FoldChange),na.rm=TRUE)
+summary(abs(res.drug$log2FoldChange), na.rm=TRUE)
+# log2fc_filt <- which(abs(res.drug$log2FoldChange) > 1.5)
+# res.drug<- res.drug[log2fc_filt,]
+
+# Sort summary list by p-value
+res.drug <- res.drug[order(res.drug$padj),]
+# number of genes with p-values less than 0.05
+sum(res.drug$padj < 0.05 & res.drug$log2FoldChange > 1.5, na.rm=TRUE)
+
+head(res.drug)
+```
+
+```{r DESeq2 Results: shMITF vs SCR}
+res.KD<- results(dds.KD, alpha=0.05)
+# Filter out lower Log2FC
+mean(abs(res.KD$log2FoldChange),na.rm=TRUE)
+summary(abs(res.KD$log2FoldChange), na.rm=TRUE)
+# log2fc_filt <- which(abs(res.KD$log2FoldChange) > 1.5)
+# res.KD <- res.KD[log2fc_filt,]
+
+# Sort summary list by p-value
+res.KD <- res.KD[order(res.KD$padj),]
+# number of genes with p-values less than 0.05
+sum(res.KD$padj < 0.05, na.rm=TRUE)
+
+head(res.KD)
+```
+
+```{r Annotation}
+res.COLO.genename <- as.data.frame(res.celltype.COLO) %>%
+  rownames_to_column("ENSEMBL")
+res.SKMEL5.genename  <- as.data.frame(res.celltype.SKMEL5) %>%
+  rownames_to_column("ENSEMBL")
+res.WM2664.genename<- as.data.frame(res.celltype.WM2664) %>%
+  rownames_to_column("ENSEMBL")
+res.drug.genename <- as.data.frame(res.drug) %>%
+  rownames_to_column("ENSEMBL")
+res.KD.genename <- as.data.frame(res.KD) %>%
+  rownames_to_column("ENSEMBL")
+
+anno.celltype.COLO <- AnnotationDbi::select(org.Hs.eg.db, res.COLO.genename$ENSEMBL,
+              columns=c("ENSEMBL","SYMBOL","GENENAME","ENTREZID"),
+              keytype="ENSEMBL") %>% 
+  filter(!duplicated(ENSEMBL))
+anno.celltype.SKMEL5 <- AnnotationDbi::select(org.Hs.eg.db, res.SKMEL5.genename$ENSEMBL,
+              columns=c("ENSEMBL","SYMBOL","GENENAME","ENTREZID"),
+              keytype="ENSEMBL") %>% 
+  filter(!duplicated(ENSEMBL))
+anno.celltype.WM2664 <- AnnotationDbi::select(org.Hs.eg.db, res.WM2664.genename$ENSEMBL,
+              columns=c("ENSEMBL","SYMBOL","GENENAME","ENTREZID"),
+              keytype="ENSEMBL") %>% 
+  filter(!duplicated(ENSEMBL))
+anno.drug <- AnnotationDbi::select(org.Hs.eg.db, res.drug.genename$ENSEMBL,
+              columns=c("ENSEMBL","SYMBOL","GENENAME","ENTREZID"),
+              keytype="ENSEMBL") %>% 
+  filter(!duplicated(ENSEMBL))
+anno.KD <- AnnotationDbi::select(org.Hs.eg.db, res.KD.genename$ENSEMBL,
+              columns=c("ENSEMBL","SYMBOL","GENENAME","ENTREZID"),
+              keytype="ENSEMBL") %>% 
+  filter(!duplicated(ENSEMBL))
+
+res.COLO.annotated <- left_join(res.COLO.genename, anno.celltype.COLO, by="ENSEMBL")
+res.SKMEL5.annotated <- left_join(res.SKMEL5.genename, anno.celltype.SKMEL5, by="ENSEMBL")
+res.WM2664.annotated <- left_join(res.WM2664.genename, anno.celltype.WM2664, by="ENSEMBL")
+res.drug.annotated <- left_join(res.drug.genename, anno.drug, by="ENSEMBL")
+res.KD.annotated <- left_join(res.KD.genename, anno.KD, by="ENSEMBL")
+```
+
+
+```{r Export DGE to CSV}
+project_dir <- "/Users/donghur/Desktop/STEMREM 205 - Bioinformatics for Stem Cell and Cancer Biology/Project"
+filepath <- file.path(project_dir, "Data/RNA-seq", "melanoma_RNA_samplemetadata.csv")
+
+#resSig <- subset(resOrdered, padj < 0.1)
+write.csv(as.data.frame(res.COLO.annotated), 
+          file=file.path(project_dir, "Data/RNA-seq", "DGE_melanocyte_COLO.csv"),
+          row.names=FALSE)
+write.csv(as.data.frame(res.SKMEL5.annotated), 
+          file=file.path(project_dir, "Data/RNA-seq", "DGE_melanocyte_SKMEL5.csv"),
+          row.names=FALSE)
+write.csv(as.data.frame(res.WM2664.annotated), 
+          file=file.path(project_dir, "Data/RNA-seq", "DGE_melanocyte_WM2664.csv"),
+          row.names=FALSE)
+write.csv(as.data.frame(res.drug.annotated), 
+          file=file.path(project_dir, "Data/RNA-seq", "DGE_drug.csv"),
+          row.names=FALSE)
+write.csv(as.data.frame(res.KD.annotated), 
+          file=file.path(project_dir, "Data/RNA-seq", "DGE_KD.csv"),
+          row.names=FALSE)
+```
+
+# 3. Visualization
+
+```{r Volcano Plot: Drug}
+res.drug.symbol <- res.drug
+ens <- rownames(res.drug.symbol)
+symbols <- mapIds(org.Hs.eg.db, keys = ens, column = c('SYMBOL'), keytype = 'ENSEMBL')
+rownames(res.drug.symbol)[!is.na(symbols)] <- symbols[!is.na(symbols)]
+
+EnhancedVolcano(res.drug,
+    lab = rownames(res.drug),
+    selectLab = c('ENSG00000225339', "ENSG00000262327", "ENSG00000100100", "ENSG00000107165"),
+    x = 'log2FoldChange',
+    y = 'pvalue',
+    title = 'DMSO vs PLX',
+    subtitle = "",
+    pCutoff = 0.05,
+    FCcutoff = 2,
+    pointSize = 1.0,
+    labSize = 5.0,
+    legendPosition = 'right', #'right'
+    legendLabSize = 16,
+    gridlines.major = FALSE,
+    gridlines.minor = FALSE,
+    legendIconSize = 5.0,
+    drawConnectors = TRUE,
+    widthConnectors = 1.0,)
+
+```
+```{r Volcano Plot: Drug - closer view}
+res.drug.symbol <- res.drug
+ens <- rownames(res.drug.symbol)
+symbols <- mapIds(org.Hs.eg.db, keys = ens, column = c('SYMBOL'), keytype = 'ENSEMBL')
+rownames(res.drug.symbol)[!is.na(symbols)] <- symbols[!is.na(symbols)]
+
+# remove these genes to get a closer view of the volcano plot
+del_idx <- match(c("AGK", "PIK3IP1", "ENSG00000225339", "TYRP1"), rownames(res.drug.symbol))
+
+EnhancedVolcano(res.drug.symbol[-del_idx,],
+    lab = rownames(res.drug.symbol[-del_idx,]),
+    x = 'log2FoldChange',
+    y = 'pvalue',
+    title = 'DMSO vs PLX',
+    subtitle = "",
+    pCutoff = 0.05,
+    FCcutoff = 2,
+    pointSize = 1.0,
+    labSize = 5.0,
+    gridlines.major = FALSE,
+    gridlines.minor = FALSE,
+    legendPosition = 'right', #'right'
+    legendLabSize = 16,
+    legendIconSize = 5.0)
+
+```
+
+
+```{r Volcano Plot: shMITF}
+res.KD.symbol <- res.KD
+ens <- rownames(res.KD.symbol)
+symbols <- mapIds(org.Hs.eg.db, keys = ens, column = c('SYMBOL'), keytype = 'ENSEMBL')
+rownames(res.KD.symbol)[!is.na(symbols)] <- symbols[!is.na(symbols)]
+
+EnhancedVolcano(res.KD.symbol,
+    lab = rownames(res.KD.symbol),
+    x = 'log2FoldChange',
+    y = 'pvalue',
+    title = 'SCR vs shMITF',
+    subtitle = "",
+    pCutoff = 0.05,
+    FCcutoff = 2,
+    pointSize = 1.0,
+    labSize = 5.0,
+    legendPosition = 'none', #'right'
+    legendLabSize = 16,
+    legendIconSize = 5.0)
+
+```
+
+```{r plotCounts}
+geneofinterest <- "TYRP1"
+gene_idx <- which(res.drug.annotated$SYMBOL == geneofinterest)
+plotCounts(dds.drug, gene="ENSG00000231023", intgroup="drug")
+
+```
+```{r plotCounts - shMITF}
+geneofinterest <- "ENSG00000213401"
+gene_idx <- which(res.KD.annotated$SYMBOL == geneofinterest)
+plotCounts(dds.KD, gene="ENSG00000233450", intgroup="KD")
+
+```
+```{r difference in DGE between drug and KD}
+idx_drug_KD <- match(res.drug.annotated$ENSEMBL, res.KD.annotated$ENSEMBL)
+res.KD.drugmatch <- res.KD.annotated[idx_drug_KD,]
+
+diff <- res.KD.drugmatch$log2FoldChange - res.drug.annotated$log2FoldChange
+idx_diff_sign <- which(sign(res.drug.annotated$log2FoldChange) != sign(res.KD.drugmatch$log2FoldChange))
+
+res.log2fc_diff <- data.frame(SYMBOL=res.drug.annotated[idx_diff_sign,]$SYMBOL, 
+                              ENSEMBL=res.drug.annotated[idx_diff_sign,]$ENSEMBL,
+                              diff=diff[idx_diff_sign],
+                              druglog2fc=res.drug.annotated$log2FoldChange[idx_diff_sign],
+                              KDlog2fc=res.KD.drugmatch$log2FoldChange[idx_diff_sign])
+res.log2fc_diff <- res.log2fc_diff[order(abs(res.log2fc_diff$diff), decreasing=TRUE),]
+```
+
+```{r VST and RLOG}
+
+vsd.celltype <- vst(dds.celltype, blind=FALSE)
+rld.celltype <- rlog(dds.celltype, blind=FALSE)
+
+vsd.drug <- vst(dds.drug, blind=FALSE)
+rld.drug <- rlog(dds.drug, blind=FALSE)
+
+vsd.KD <- vst(dds.KD, blind=FALSE)
+rld.KD <- rlog(dds.KD, blind=FALSE)
+```
+
+```{r}
+res <- lfcShrink(dds, coef="condition_trt_vs_untrt", type="apeglm")
+```
+
+```{r PCA}
+plotPCA(vsd.celltype, intgroup="cell_type")
+
+PCAdata <- plotPCA(vsd.drug, intgroup=c("drug","cell_type"), returnData = TRUE)
+percentVar <- round(100 * attr(PCAdata, "percentVar"))
+ggplot(PCAdata, aes(PC1, PC2, color=cell_type, shape=drug)) +
+  geom_point(size=3) +
+  xlab(paste0("PC1: ",percentVar[1],"% variance")) +
+  ylab(paste0("PC2: ",percentVar[2],"% variance")) + 
+  coord_fixed()
+
+PCAdata <- plotPCA(vsd.KD, intgroup=c("KD","cell_type"), returnData = TRUE)
+percentVar <- round(100 * attr(PCAdata, "percentVar"))
+
+ggplot(PCAdata, aes(PC1, PC2, color=cell_type, shape=KD)) +
+  geom_point(size=3) +
+  xlab(paste0("PC1: ",percentVar[1],"% variance")) +
+  ylab(paste0("PC2: ",percentVar[2],"% variance")) + 
+  coord_fixed()
+
+```
+
+```{r Heatmap: Melanoma vs Melanocytes}
+select.celltype <- order(rowMeans(counts(dds.celltype,normalized=TRUE)),
+                decreasing=TRUE)[1:1000]
+df.celltype <- as.data.frame(colData(dds.celltype)[,c("cell_type", "drug")])
+df.celltype <- df.celltype[,1, drop=FALSE] 
+pheatmap(assay(vsd.celltype)[select.celltype,], cutree_rows=4, cutree_cols=3, cluster_rows=TRUE, show_rownames=FALSE, show_colnames=FALSE, cluster_cols=TRUE, annotation_col=df.celltype, main="Normalized Gene Count Between Melanoma and Melanocytes")
+```
+
+```{r Heatmap: PLX vs DMSO}
+select.drug <- order(rowMeans(counts(dds.drug, normalized=TRUE)),
+                decreasing=TRUE)[1:25]
+df.drug <- as.data.frame(colData(dds.drug)[,c("cell_type", "drug")])
+pheatmap(assay(vsd.drug)[select.celltype,], cutree_rows=4, cutree_cols=3, cluster_rows=TRUE, show_rownames=FALSE, show_colnames=FALSE, cluster_cols=TRUE, annotation_col=df.drug, main="Normalized Gene Count Between PLX and DMSO")
+```
+
+
+```{r Heatmap:shMITF vs SCR}
+select.KD <- order(rowMeans(counts(dds.KD ,normalized=TRUE)),
+                decreasing=TRUE)[1:1000]
+df.KD <- as.data.frame(colData(dds.KD)[,c("cell_type", "KD")])
+pheatmap(assay(rld.KD)[select.KD,], cutree_rows=4, cutree_cols=3, cluster_rows=TRUE, show_rownames=FALSE, show_colnames=FALSE, cluster_cols=TRUE, annotation_col=df.KD, main="Normalized Gene Count Between shMITF and SCR")
+```
+
+
+```{r Heatmap: PLX vs DMSO - sorted genes by DGE}
+topgenes_idx <- res.drug.annotated$ENSEMBL[1:100]
+norm_counts <- counts(dds.drug, normalized=TRUE)
+select.drug <- which(rownames(norm_counts) %in% topgenes_idx)
+df.drug <- as.data.frame(colData(dds.drug)[,c("cell_type", "drug")])
+
+# associate genename with ENSEMBL
+filtered.rld.drug <- assay(rld.drug)[select.drug,]
+corr_genenames <- select(org.Hs.eg.db, keys=rownames(filtered.rld.drug), 
+       columns=c("SYMBOL", "GENENAME"), keytype="ENSEMBL")
+rownames(filtered.rld.drug) <- corr_genenames[,"SYMBOL"]
+
+pheatmap(filtered.rld.drug, border_color='NA', cutree_rows=8, cutree_cols=2, cluster_rows=TRUE, show_rownames=FALSE, fontsize_row=7, show_colnames=FALSE, cluster_cols=TRUE, annotation_col=df.drug, main="Normalized Top 100 Differential Gene Count Between PLX and DMSO")
+
+```
+
+```{r Heatmap: shMITF vs SCR - sorted genes by DGE}
+topgenes_idx <- res.KD.annotated$ENSEMBL[1:25]
+norm_counts <- counts(dds.KD, normalized=TRUE)
+select.KD <- which(rownames(norm_counts) %in% topgenes_idx)
+df.KD <- as.data.frame(colData(dds.KD)[,c("cell_type", "KD")])
+
+# associate genename with ENSEMBL
+filtered.rld.KD <- assay(rld.KD)[select.KD,]
+corr_genenames <- select(org.Hs.eg.db, keys=rownames(filtered.rld.KD), 
+       columns=c("SYMBOL", "GENENAME"), keytype="ENSEMBL")
+rownames(filtered.rld.KD) <- corr_genenames[,"SYMBOL"]
+  
+# colors <- colorRampPalette( rev(brewer.pal(9, "Blues")) )(255)
+pheatmap(filtered.rld.KD, border_color='NA', cutree_rows=8, cutree_cols=2, cluster_rows=TRUE, show_rownames=TRUE, fontsize_row=7, show_colnames=FALSE, cluster_cols=TRUE, annotation_col=df.KD, main="Normalized Top 25 Differential Gene Count Between shMITF and SCR")
+```
+
+# ATACseq gene comparison
+```{r}
+project_dir <- "/Users/donghur/Desktop/STEMREM 205 - Bioinformatics for Stem Cell and Cancer Biology/Project"
+filepath <- file.path(project_dir, "Data/ATAC-seq", "genes_GREATanalysis_PLXtreated.txt")
+# Read the sample information into R
+ATAC_drug <- read.csv(filepath, header = F, sep = "\t")
+colnames(ATAC_drug)<-c("SYMBOL","peak")
+```
+
+```{r}
+intersect(ATAC_drug$SYMBOL, res.drug.annotated$SYMBOL)
+# intersect(ATAC_drug[1], ATAC_drug[1])
+
+```
+
+```{r}
+project_dir <- "/Users/donghur/Desktop/STEMREM 205 - Bioinformatics for Stem Cell and Cancer Biology/Project"
+filepath <- file.path(project_dir, "Data/ATAC-seq", "genes_GREATanalysis_shMITF_p0.01.txt")
+# Read the sample information into R
+ATAC_drug <- read.csv(filepath, header = F, sep = "\t")
+colnames(ATAC_drug)<-c("SYMBOL","peak")
+```
+
+```{r}
+intersect(ATAC_drug$SYMBOL, res.KD.annotated$SYMBOL)
+# intersect(ATAC_drug[1], ATAC_drug[1])
+
+```
+
+
+
+
+
+
+
+

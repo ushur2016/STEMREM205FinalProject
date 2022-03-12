@@ -1,0 +1,97 @@
+---
+title: "GeneSetEnrichment"
+output: html_document
+date: '2022-02-23'
+---
+
+```{r, message = FALSE}
+library(DESeq2)
+library(edgeR)
+library(gplots)
+library(org.Mm.eg.db)
+library(org.Hs.eg.db)
+library(dplyr)
+library(tibble)
+library(clusterProfiler)
+library(enrichplot)
+library(ggnewscale)
+```
+
+```{r setup, include=FALSE}
+figure_filepath <- "/Users/donghur/Desktop/STEMREM 205 - Bioinformatics for Stem Cell and Cancer Biology/Project/Figures"
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+### Gene Set Enrichment Analysis
+
+Gene Set Enrichment Analysis (GSEA) is a computational method that determines whether a pre-defined set of genes (ex: those beloging to a specific GO term or KEGG pathway) shows statistically significant, concordant differences between two biological states.
+
+Prepare input 
+```{r}
+
+project_dir <- "/Users/donghur/Desktop/STEMREM 205 - Bioinformatics for Stem Cell and Cancer Biology/Project"
+filepath <- file.path(project_dir, "Data/RNA-seq", "DGE_KD.csv")
+# reading in data from deseq2
+df = read.csv(filepath, header=TRUE)
+
+# we want the log2 fold change 
+original_gene_list <- df$log2FoldChange
+
+# name the vector
+names(original_gene_list) <- df$ENSEMBL
+
+# omit any NA values 
+gene_list<-na.omit(original_gene_list)
+
+# sort the list in decreasing order (required for clusterProfiler)
+gene_list = sort(gene_list, decreasing = TRUE)
+```
+
+Gene Set Enrichment
+```{r}
+gse <- gseGO(geneList=gene_list, 
+             ont ="ALL", 
+             keyType = "ENSEMBL", 
+             nPerm = 10000, 
+             minGSSize = 3, 
+             maxGSSize = 800, 
+             pvalueCutoff = 0.05, 
+             verbose = TRUE, 
+             OrgDb = org.Hs.eg.db, 
+             pAdjustMethod = "none")
+```
+
+```{r}
+gse 
+```
+
+
+```{r Dotplot}
+require(DOSE)
+pdf(file.path(figure_filepath, "Dotplot.pdf"))
+dotplot(gse, showCategory=10, split=".sign") + facet_grid(.~.sign)
+dev.off()
+```
+
+
+
+Encrichment Map
+```{r}
+gse2 <- pairwise_termsim(gse) 
+
+pdf(file.path(figure_filepath, "EnrichmentMap.pdf"))
+emapplot(gse2, showCategory = 10)
+dev.off()
+
+```
+
+
+GSEA Plot
+```{r}
+# Use the `Gene Set` param for the index in the title, and as the value for geneSetId
+gseaplot(gse, by = "all", title = gse$Description[1], geneSetID = 1)
+```
+
+
+
+
