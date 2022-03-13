@@ -1,0 +1,49 @@
+---
+title: "survival_immunotherapy"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Load packages
+
+```{r Packages}
+library(tidyverse)
+library(readxl)
+library(survival)
+library(survminer)
+```
+
+## PPARGC1A Mutation
+
+```{r PPARGC1A, echo=FALSE}
+surv_data <- read_excel("surv_data.xlsx")
+fit <- survfit(Surv(OS, dead) ~ PPARGC1A, data = surv_data)
+ggsurvplot(fit, 
+           data = surv_data, 
+           pval = TRUE, 
+           risk.table = TRUE,        
+           risk.table.col = "PPARGC1A",
+           legend.labs = c("WT", "Mutant"),
+           xlab = "Time (Days)",
+           title = "Overall Survival by PPARGC1A Mutation Status"
+           )
+```
+
+## COL3A1 Mutation
+
+```{r PPARGC1A, echo=FALSE}
+surv_data <- read_excel("surv_data.xlsx")
+fit_2 <- survfit(Surv(OS, dead) ~ COL3A1, data = surv_data)
+ggsurvplot(fit_2, 
+           data = surv_data, 
+           pval = TRUE, 
+           risk.table = TRUE,
+           risk.table.col = "COL3A1",
+           legend.labs = c("WT", "Mutant"),
+           xlab = "Time (Days)",
+           title = "Overall Survival by COL3A1 Mutation Status"
+)
+```
