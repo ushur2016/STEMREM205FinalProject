@@ -1,0 +1,408 @@
+---
+title: "melanoma_ATAC"
+author: "Konnie Guo"
+date: "2/26/2022"
+output: rmarkdown::github_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir ='C:/Users/kqguo/Desktop/khavari-lab')
+library(DESeq2)
+library(corrplot)
+library(pheatmap)
+library(foreach)
+library(dplyr)
+library(ggplot2)
+library(RColorBrewer)
+library(GenomicRanges)
+library(Rsubread)
+library(ChIPseeker)
+library(EnhancedVolcano)
+```
+
+## ATAC-seq data
+
+Read in raw ATAC .narrowPeak files for each sample. 
+```{r ATAC_data, eval=FALSE}
+# files<-list.files("data/ATAC-seq/narrowPeak", pattern = "*bfilt.narrowPeak", recursive = T)
+# 
+# raw<-foreach(file=files) %do% read.table(paste("data/ATAC-seq/",file,sep=""), header = F, sep = "\t")
+# names(raw)<-gsub("_R1.trim.merged.nodup.tn5.pval0.05.300K.bfilt.narrowPeak|-AGGTTGGG-ATAGAGAG_S19_L001_R1_001.trim.merged.nodup.tn5.pval0.05.300K.bfilt.narrowPeak|-GTGTGGTG-ATAGAGAG_S20_L001_R1_001.trim.merged.nodup.tn5.pval0.05.300K.bfilt.narrowPeak", "", basename(files)) 
+# status<-names(raw)
+# 
+# tmp <- mapply(cbind, raw, "celltype"=status, SIMPLIFY=F)
+# 
+# tmp<-Map(function(x, n) setNames(x, c("chr", "start", "stop", "celltype")),  tmp, names(tmp))
+
+#note that since these peaks are combined from multiple narrowPeak files, the peakIDs are NOT unique
+all_peaks <- read.table("data/ATAC-seq/narrowPeak/ATAC_all_merged.narrowPeak", sep="\t",header = F)
+colnames(all_peaks)<-c("chr","start","stop","peakID","score","strand","signalVal","pVal","qVal","peak")
+peaks<-makeGRangesFromDataFrame(all_peaks,
+                               seqinfo = Seqinfo(genome="hg38"),
+                                keep.extra.columns = T)
+peaks<-trim(peaks)
+consensuspeaks<-reduce(peaks)
+seqinfo(consensuspeaks)
+
+#create merged peak table with unique peak IDs
+mergedpeaks<-data.frame(GeneID=paste("Pk",1:length(consensuspeaks),sep="_"),
+  Chr=seqnames(consensuspeaks),
+  Start=start(consensuspeaks)-1,
+  End=end(consensuspeaks),
+  strands=strand(consensuspeaks)
+)
+
+# write.table(mergedpeaks,"data/ATAC-seq/melanoma_ATAC_mergedpeaks_nontrimmed.saf",sep = "\t",col.names = T,row.names = F,quote = F)
+```
+
+## Count table
+
+Make counts table for each sample using Rsubread 
+
+*note that I had to convert .narrowPeak files to .bam using bedtools bedToBam
+
+```{r featureCounts, eval=FALSE}
+bam <-list.files("data/ATAC-seq/bam", pattern = "*.bam", recursive = T)
+counts<-featureCounts(paste("data/ATAC-seq/bam/",bam,sep = ""), annot.ext="data/ATAC-seq/melanoma_ATAC_mergedpeaks.saf")
+ct_table<-counts$counts
+colnames(ct_table)<-gsub("_R1.trim.merged.nodup.tn5.pval0.01.300K.bfilt.narrowPeak.bam|-AGGTTGGG-ATAGAGAG_S19_L001_R1_001.trim.merged.nodup.tn5.pval0.01.300K.bfilt.narrowPeak.bam|-GTGTGGTG-ATAGAGAG_S20_L001_R1_001.trim.merged.nodup.tn5.pval0.01.300K.bfilt.narrowPeak.bam", "", colnames(ct_table))
+# write.table(ct_table,"data/ATAC-seq/melanoma_ATAC_counttable.txt",sep="\t",col.names = T, row.names = T, quote = F)
+```
+
+## Counts normalization
+
+Normalize counts (CPM)
+```{r norm}
+mergedpeaks<-read.table("data/ATAC-seq/melanoma_ATAC_mergedpeaks.saf", sep="\t",header = T)
+samples<-read.table("data/ATAC-seq/melanoma_ATAC_samplemetadata.csv", header = T, sep=",")
+samples[9:10,4]<-"DMSO"
+samples[9:10,5]<-"SCR"
+
+samples$group<- ifelse(grepl("Melanocytes", samples$file), "melanocyte", "melanoma")
+
+counts<-read.table("data/ATAC-seq/melanoma_ATAC_counttable.txt", header = T, sep="\t")
+colnames(counts)<-gsub("_merged.bam", "", colnames(counts))
+
+counts_cpm<-data.frame(apply(counts,2, function(x) (x/sum(x))*1000000))
+counts_comp_filt<-counts_cpm[rowSums(counts_cpm > 0.5) >= 2, ]
+nrow(counts_comp_filt)
+
+log2cpm<-log2(counts_cpm+1)
+
+# write.table(log2cpm,"data/ATAC-seq/atac_log2cpm.txt",sep = "\t", col.names = T, row.names = T, quote = F)
+# write.table(counts,"data/ATAC-seq/atac_counts_filt.txt",sep = "\t", col.names = T, row.names = T, quote = F)
+
+```
+
+## Plots
+
+Plotting log2cpm normalized data
+```{r plots, fig.height=8,fig.width=8}
+boxplot(log2cpm, xlab = "Cell Sample", ylab= "log2 CPM", cex.axis=0.5, las=2)
+
+#PCA
+prcomp<-prcomp(t(log2cpm))
+summary(prcomp)
+pca <- as.data.frame(prcomp$x)
+pca$samples<-rownames(prcomp$x)
+pca<-cbind(pca, samples[,3:4])
+percentage <- round(prcomp$sdev^2 /sum(prcomp$sdev^2)*100, 2)
+percentage <- paste(colnames(pca), "(", paste(as.character(percentage), "%", " )", sep="") )
+
+ggplot(pca, aes(x = PC1, y = PC2, color=cell_type, shape=drug)) + geom_point(size=3) +xlab(percentage[1]) + ylab(percentage[2])#+geom_text(aes(label=all.pca$sample))
+
+corrplot(cor(log2cpm-apply(log2cpm,1,mean)),
+         method = "color", 
+         order = "hclust", 
+         tl.cex=1, 
+         mar=c(0.001,0.001,0.001,0.001),
+         #addrect = 3,
+         rect.lwd=0.5,
+         title = "Pearson correlation among log2 CPM for all samples"
+)
+corrplot(cor(log2cpm),
+         method = "color", 
+         order = "hclust", 
+         tl.cex=1, 
+         mar=c(0.001,0.001,0.001,0.001),
+         #addrect = 3,
+         rect.lwd=0.5,
+         title = "Pearson correlation among log2 CPM for all samples"
+)
+```
+# Differential Peak Analysis
+
+### Normalization and fitting model
+Here we run DESeq2 on the count matrix. The design matrix looks for initial differences between melanoma and melanocyte, compared all together (all melanoma vs melanocytes) and individually (i.e. melanocyte vs COLO, melanocyte vs WM, melanocyte vs SKMEL5).
+```{r DESeq2_allMelanomavsMelanocytes}
+dds <- DESeqDataSetFromMatrix(countData = counts[grep("SCR.DMSO|Melanocytes",names(counts))],
+                              colData = samples[grep("SCR-DMSO|Melanocytes",samples$file),],
+                              design = ~group)
+dds
+
+dds <- DESeq(dds)
+res <- results(dds)
+res
+summary(res)
+resultsNames(dds)
+res <- lfcShrink(dds,coef=2,res=res, type = 'normal')
+EnhancedVolcano(res, lab = rownames(res), x = 'log2FoldChange', y = 'pvalue')
+
+```
+### Plotting of all melanoma vs melanocyte differential peaks as found by DESeq2
+```{r heatmap_allMelanomavsMelanocytes, fig.height=7,fig.width=5}
+
+resOrdered <- res[order(res$log2FoldChange),]
+resSig <- subset(resOrdered, pvalue < 0.05)
+nrow(resSig)
+#top20_counts<-counts(dds,normalized=T)[resSig@rownames,]
+top_counts<-log2cpm[resSig@rownames,]
+top_counts<-top_counts[grep("SCR.DMSO|Melanocytes",names(top_counts))]
+anno<-as.data.frame(colData(dds)[,c("cell_type")])
+rownames(anno)<-colnames(top_counts)
+colnames(anno)<-"Cell Type"
+#breaksList = seq(0, 4, by=0.05)
+pheatmap(top_counts,
+         # color = colorRampPalette(rev(brewer.pal(n = 7, name = "RdYlBu")))(length(breaksList)),
+         # breaks = breaksList, 
+         cluster_rows = F, 
+         cluster_cols = T,
+         annotation_col = anno,
+         show_rownames = F)
+
+#make table of all differential peaks with coords, DESeq2 results, and count table
+diff_peaks<-merge(as.data.frame(res),log2cpm[grep("SCR.DMSO|Melanocytes",names(log2cpm))],by=0)
+colnames(diff_peaks)[1]<-"GeneID"
+diff_peaks<-merge(mergedpeaks,diff_peaks,by="GeneID")
+# write.table(diff_peaks,"data/ATAC-seq/diffPeaks_allmelanoma_vs_melanocyte.csv",sep=",", row.names = F,col.names = T,quote = F)
+```
+## COLO cell line vs Melanocytes
+```{r DESeq2_COLOvsMelanocytes}
+dds <- DESeqDataSetFromMatrix(countData = counts[grep("COLO.SCR.DMSO|Melanocytes",names(counts))],
+                              colData = samples[grep("COLO-SCR-DMSO|Melanocytes",samples$file),],
+                              design = ~group)
+
+dds
+
+dds <- DESeq(dds)
+res <- results(dds)
+res
+summary(res)
+resultsNames(dds)
+res <- lfcShrink(dds,coef=2,res=res, type = 'normal')
+EnhancedVolcano(res, lab = rownames(res), x = 'log2FoldChange', y = 'pvalue')
+
+```
+Plotting of COLO vs melanocytes differential peaks as found by DESeq2
+```{r heatmap_COLOvsMelanocytes, fig.height=7,fig.width=5}
+
+resOrdered <- res[order(res$log2FoldChange),]
+resSig <- subset(resOrdered, pvalue < 0.05)
+nrow(resSig)
+#top20_counts<-counts(dds,normalized=T)[resSig@rownames,]
+top_counts<-log2cpm[resSig@rownames,]
+top_counts<-top_counts[grep("COLO.SCR.DMSO|Melanocytes",names(top_counts))]
+anno<-as.data.frame(colData(dds)[,c("cell_type")])
+rownames(anno)<-colnames(top_counts)
+colnames(anno)<-"Cell Type"
+#breaksList = seq(0, 4, by=0.05)
+pheatmap(top_counts,
+         # color = colorRampPalette(rev(brewer.pal(n = 7, name = "RdYlBu")))(length(breaksList)),
+         # breaks = breaksList, 
+         cluster_rows = F, 
+         cluster_cols = T,
+         annotation_col = anno,
+         show_rownames = F)
+
+#make table of all differential peaks with coords, DESeq2 results, and count table
+diff_peaks<-merge(as.data.frame(res),log2cpm[grep("COLO.SCR.DMSO|Melanocytes",names(log2cpm))],by=0)
+colnames(diff_peaks)[1]<-"GeneID"
+diff_peaks<-merge(mergedpeaks,diff_peaks,by="GeneID")
+
+# write.table(diff_peaks,"data/ATAC-seq/diffPeaks_COLO_vs_melanocyte.csv",sep=",", row.names = F,col.names = T,quote = F)
+```
+
+## SKMEL5 cell lines vs melanocytes
+```{r DESeq2_SKMEL5vsMelanocytes}
+dds <- DESeqDataSetFromMatrix(countData = counts[grep("SKMEL5.SCR.DMSO|Melanocytes",names(counts))],
+                              colData = samples[grep("SKMEL5-SCR-DMSO|Melanocytes",samples$file),],
+                              design = ~group)
+
+dds
+
+dds <- DESeq(dds)
+res <- results(dds)
+res
+summary(res)
+resultsNames(dds)
+res <- lfcShrink(dds,coef=2,res=res, type = 'normal')
+EnhancedVolcano(res, lab = rownames(res), x = 'log2FoldChange', y = 'pvalue')
+
+```
+
+### Plotting of SKMEL5 vs melanocytes differential peaks as found by DESeq2
+```{r heatmap_SKMEL5vsMelanocytes, fig.height=7,fig.width=5}
+
+resOrdered <- res[order(res$log2FoldChange),]
+resSig <- subset(resOrdered, pvalue < 0.05)
+nrow(resSig)
+#top20_counts<-counts(dds,normalized=T)[resSig@rownames,]
+top_counts<-log2cpm[resSig@rownames,]
+top_counts<-top_counts[grep("SKMEL5.SCR.DMSO|Melanocytes",names(top_counts))]
+anno<-as.data.frame(colData(dds)[,c("cell_type")])
+rownames(anno)<-colnames(top_counts)
+colnames(anno)<-"Cell Type"
+# breaksList = seq(0, 4, by=0.05)
+pheatmap(top_counts,
+         # color = colorRampPalette(rev(brewer.pal(n = 7, name = "RdYlBu")))(length(breaksList)),
+         # breaks = breaksList, 
+         cluster_rows = F, 
+         cluster_cols = T,
+         annotation_col = anno,
+         show_rownames = F)
+
+#make table of all differential peaks with coords, DESeq2 results, and count table
+diff_peaks<-merge(as.data.frame(res),log2cpm[grep("SKMEL5.SCR.DMSO|Melanocytes",names(log2cpm))],by=0)
+colnames(diff_peaks)[1]<-"GeneID"
+diff_peaks<-merge(mergedpeaks,diff_peaks,by="GeneID")
+# write.table(diff_peaks,"data/ATAC-seq/diffPeaks_SKMEL5_vs_melanocyte.csv",sep=",", row.names = F,col.names = T,quote = F)
+```
+
+## WM2664 cell lines vs melanocytes
+```{r DESeq2_WM2664vsMelanocytes}
+dds <- DESeqDataSetFromMatrix(countData = counts[grep("WM2664.SCR.DMSO|Melanocytes",names(counts))],
+                              colData = samples[grep("WM2664-SCR-DMSO|Melanocytes",samples$file),],
+                              design = ~group)
+
+dds
+
+dds <- DESeq(dds)
+res <- results(dds)
+res
+summary(res)
+resultsNames(dds)
+res <- lfcShrink(dds,coef=2,res=res, type = 'normal')
+EnhancedVolcano(res, lab = rownames(res), x = 'log2FoldChange', y = 'pvalue')
+
+```
+
+### Plotting of WM2664 vs melanocytes differential peaks as found by DESeq2
+```{r heatmap_WM2664vsMelanocytes, fig.height=7,fig.width=5}
+
+resOrdered <- res[order(res$log2FoldChange),]
+resSig <- subset(resOrdered, pvalue < 0.05)
+nrow(resSig)
+#top20_counts<-counts(dds,normalized=T)[resSig@rownames,]
+top_counts<-log2cpm[resSig@rownames,]
+top_counts<-top_counts[grep("WM2664.SCR.DMSO|Melanocytes",names(top_counts))]
+anno<-as.data.frame(colData(dds)[,c("cell_type")])
+rownames(anno)<-colnames(top_counts)
+colnames(anno)<-"Cell Type"
+# breaksList = seq(0, 4, by=0.05)
+pheatmap(top_counts,
+         # color = colorRampPalette(rev(brewer.pal(n = 7, name = "RdYlBu")))(length(breaksList)),
+         # breaks = breaksList, 
+         cluster_rows = F, 
+         cluster_cols = T,
+         annotation_col = anno,
+         show_rownames = F)
+
+#make table of all differential peaks with coords, DESeq2 results, and count table
+diff_peaks<-merge(as.data.frame(res),log2cpm[grep("WM2664.SCR.DMSO|Melanocytes",names(log2cpm))],by=0)
+colnames(diff_peaks)[1]<-"GeneID"
+diff_peaks<-merge(mergedpeaks,diff_peaks,by="GeneID")
+# write.table(diff_peaks,"data/ATAC-seq/diffPeaks_WM2664_vs_melanocyte.csv",sep=",", row.names = F,col.names = T,quote = F)
+```
+
+## Drug treatment comparisons
+Comparing open regions for melanoma cell lines treated with PLX and without (DMSO) 
+
+```{r DESeq2_PLX}
+dds <- DESeqDataSetFromMatrix(countData = counts[grep("SCR.DMSO|SCR.PLX",names(counts))],
+                              colData = samples[grep("SCR-DMSO|SCR-PLX",samples$file),],
+                              design = ~drug)
+dds
+
+dds <- DESeq(dds)
+res <- results(dds)
+res
+summary(res)
+
+resultsNames(dds)
+res <- lfcShrink(dds,coef=2,res=res, type = 'normal')
+EnhancedVolcano(res, lab = rownames(res), x = 'log2FoldChange', y = 'pvalue')
+
+```
+
+Plotting of differential open regions as found by DESeq2
+```{r DOR_PLX, fig.height=7,fig.width=5}
+
+resOrdered <- res[order(res$log2FoldChange),]
+resSig <- subset(resOrdered, pvalue < 0.05)
+nrow(resSig)
+#top20_counts<-counts(dds,normalized=T)[resSig@rownames,]
+top_counts<-log2cpm[resSig@rownames,]
+top_counts<-top_counts[grep("SCR.DMSO|SCR.PLX",names(top_counts))]
+anno<-as.data.frame(colData(dds)[,c("cell_type","drug")])
+rownames(anno)<-colnames(top_counts)
+colnames(anno)<-c("Cell Type", "Drug Treatment")
+
+pheatmap(top_counts,
+         cluster_rows = F, 
+         cluster_cols = T,
+         annotation_col = anno,
+         show_rownames = F)
+
+#make table of all differential peaks with coords, DESeq2 results, and count table
+diff_peaks<-merge(as.data.frame(res),log2cpm[grep("SCR.DMSO|SCR.PLX",names(log2cpm))],by=0)
+colnames(diff_peaks)[1]<-"GeneID"
+diff_peaks<-merge(mergedpeaks,diff_peaks,by="GeneID")
+# write.table(diff_peaks,"data/ATAC-seq/diffPeaks_SCR.DMSO_vs_SCR.PLX.csv",sep=",", row.names = F,col.names = T,quote = F)
+```
+
+## shMITF knockdown comparisons
+Comparing open regions for COLO cell line treated with PLX and other melanoma cell lines without
+
+```{r DESeq2_shMITF}
+dds <- DESeqDataSetFromMatrix(countData = counts[grep("SCR.DMSO|shMITF.DMSO",names(counts))],
+                              colData = samples[grep("SCR-DMSO|shMITF-DMSO",samples$file),],
+                              design = ~KD)
+dds
+
+dds <- DESeq(dds)
+res <- results(dds)
+res
+summary(res)
+
+resultsNames(dds)
+res <- lfcShrink(dds,coef=2,res=res, type = 'normal')
+EnhancedVolcano(res, lab = rownames(res), x = 'log2FoldChange', y = 'pvalue')
+
+```
+
+Plotting of differential open regions as found by DESeq2
+```{r DOR_shMITF, fig.height=7,fig.width=5}
+
+resOrdered <- res[order(res$log2FoldChange),]
+resSig <- subset(resOrdered, pvalue < 0.05)
+nrow(resSig)
+#top20_counts<-counts(dds,normalized=T)[resSig@rownames,]
+top_counts<-log2cpm[resSig@rownames,]
+top_counts<-top_counts[grep("SCR.DMSO|shMITF.DMSO",names(top_counts))]
+anno<-as.data.frame(colData(dds)[,c("cell_type","KD")])
+rownames(anno)<-colnames(top_counts)
+colnames(anno)<-c("Cell Type", "Knockdown")
+
+pheatmap(top_counts,
+         cluster_rows = F, 
+         cluster_cols = T,
+         annotation_col = anno,
+         show_rownames = F)
+
+#make table of all differential peaks with coords, DESeq2 results, and count table
+diff_peaks<-merge(as.data.frame(res),log2cpm[grep("SCR.DMSO|shMITF.DMSO",names(log2cpm))],by=0)
+colnames(diff_peaks)[1]<-"GeneID"
+diff_peaks<-merge(mergedpeaks,diff_peaks,by="GeneID")
+# write.table(diff_peaks,"data/ATAC-seq/diffPeaks_SCR.DMSO_vs_shMITF.DMSO.csv",sep=",", row.names = F,col.names = T,quote = F)
+```
